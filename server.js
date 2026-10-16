@@ -16,6 +16,7 @@ const port=Number(process.env.PORT||3080);
 const base=process.env.BASE_URL;
 const secret=process.env.SESSION_SECRET;
 const key=process.env.CREDENTIAL_KEY;
+if(process.env.NODE_ENV==='production' && new URL(base||'http://localhost').protocol!=='https:') throw Error('Production BASE_URL must be HTTPS');
 if(!base||!secret||secret.length<32||!process.env.DATABASE_URL) throw Error('Configure BASE_URL, DATABASE_URL, SESSION_SECRET (32+ characters)');
 if(!['http:','https:'].includes(new URL(base).protocol)) throw Error('Invalid BASE_URL');
 if(process.env.TRUST_PROXY==='true') app.set('trust proxy',1);
@@ -26,13 +27,14 @@ app.use(helmet({contentSecurityPolicy:{directives:{defaultSrc:["'self'"],scriptS
 app.use(express.json({limit:'16kb'}));
 app.use(session({store:new Store({pool,tableName:'sessions',createTableIfMissing:true}),name:'asanib.sid',secret,resave:false,saveUninitialized:false,cookie:{httpOnly:true,secure:process.env.NODE_ENV==='production',sameSite:'lax',maxAge:604800000}}));
 const vmFromHost=host=>{const m=/^connect-vm([1-9]|1\d|2[01])\.asanib\.com(?::\d+)?$/i.exec(host||'');return m?Number(m[1]):null;};
-const safeOrigin=req=>vmFromHost(req.get('host'))?'https://'+req.get('host'):new URL(base).origin;
+const safeOrigin=req=>vmFromHost(req.get('host'))?'https://'+req.get('host').split(':')[0]:new URL(base).origin;
 app.use((req,res,next)=>{if(!['POST','PUT','PATCH','DELETE'].includes(req.method))return next();if(req.get('origin')!==safeOrigin(req))return res.status(403).json({error:'Invalid request origin'});next();});
 const auth=(req,res,next)=>req.session.userId?next():res.status(401).json({error:'Sign in first'});
 const admin=(req,res,next)=>req.session.role==='admin'?next():res.status(403).json({error:'Admin only'});
 const run=fn=>(req,res,next)=>Promise.resolve(fn(req,res)).catch(next);
 const loginLimiter=rateLimit({windowMs:15*60*1000,limit:15,standardHeaders:'draft-7',legacyHeaders:false});
 app.get('/api/health',(_req,res)=>res.json({ok:true}));
+app.get('/api/ready',run(async(_req,res)=>{await pool.query('SELECT 1');res.json({ok:true})}));
 app.get('/api/me',(req,res)=>res.json({user:req.session.userId?{email:req.session.email,role:req.session.role}:null}));
 app.post('/api/auth/login',loginLimiter,run(async(req,res)=>{
  const email=typeof req.body?.email==='string'?req.body.email.trim().toLowerCase():'';
@@ -58,6 +60,7 @@ app.post('/api/vms/:id/claim',auth,run(async(req,res)=>{
  const client=await pool.connect();
  try{
   await client.query('BEGIN');
+  await client.query('SELECT pg_advisory_xact_lock($1)',[req.session.userId]);
   const {rows:[existing]}=await client.query('SELECT vm_id FROM claims WHERE user_id=$1 AND released_at IS NULL',[req.session.userId]);
   if(existing){await client.query('ROLLBACK');return res.status(409).json({error:'You already have a VM'});}
   const {rows:[vm]}=await client.query('SELECT id FROM vms WHERE id=$1 AND enabled=1 FOR UPDATE',[id]);
@@ -92,11 +95,14 @@ app.get('/api/connect/vm',auth,run(async(req,res)=>{
  if(storedVmNumber(decodeUrl(row.url_enc))!==number)return res.status(403).json({error:'This VM is not assigned to your account'});
  res.set('Cache-Control','no-store').json({url:'https://vm'+number+'.asanib.com'});
 }));
+app.get('/api/admin/users',auth,admin,run(async(_req,res)=>{const {rows}=await pool.query('SELECT id,email,role FROM users ORDER BY id LIMIT 500');res.json({users:rows})}));
+app.get('/api/admin/vms',auth,admin,run(async(_req,res)=>{const {rows}=await pool.query('SELECT v.id,v.name,v.os,v.enabled,c.user_id,u.email AS assigned_to FROM vms v LEFT JOIN claims c ON c.vm_id=v.id AND c.released_at IS NULL LEFT JOIN users u ON u.id=c.user_id ORDER BY v.id');res.json({vms:rows})}));
+app.post('/api/admin/vms/:id/release',auth,admin,run(async(req,res)=>{const id=Number(req.params.id);if(!Number.isSafeInteger(id)||id<1)return res.status(400).json({error:'Invalid VM'});const {rowCount}=await pool.query('UPDATE claims SET released_at=NOW() WHERE vm_id=$1 AND released_at IS NULL',[id]);res.json({ok:true,released:rowCount})}));
 app.get('/api/admin/overview',auth,admin,run(async(_req,res)=>{
  const {rows:[row]}=await pool.query('SELECT (SELECT count(*)::int FROM users WHERE role=\'student\') students,(SELECT count(*)::int FROM vms) vms,(SELECT count(*)::int FROM claims WHERE released_at IS NULL) claimed');
  res.json(row);
 }));
 app.get('/',(req,res)=>res.sendFile(path.join(root,'public',vmFromHost(req.get('host'))?'connect.html':'index.html')));
-app.use(express.static(path.join(root,'public'),{index:false}));
+app.use(express.static(path.join(root,'public'),{index:false,dotfiles:'deny'}));
 app.use((err,req,res,next)=>{console.error(err);res.status(500).json({error:'Server error'});});
 pool.query('SELECT 1').then(()=>app.listen(port,()=>console.log('Asan IB Cloud listening on '+port))).catch(e=>{console.error('Database connection failed:',e.code||e.message);process.exit(1);});
