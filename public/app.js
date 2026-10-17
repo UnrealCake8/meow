@@ -10,7 +10,17 @@ for(const b of document.querySelectorAll('[data-view]'))b.onclick=async()=>{show
 $('browseAction').onclick=()=>showView('desktops');$('seeAll').onclick=()=>showView('desktops');for(const id of ['refreshHome','refreshVms'])$(id).onclick=refresh;$('refreshAdmin').onclick=async()=>{await refresh();try{await renderAdmin()}catch(e){msg('dashMessage',e.message)}};
 $('login').addEventListener('submit',async e=>{e.preventDefault();const form=e.currentTarget;const b=$('loginButton');b.disabled=true;msg('message','Signing in…');try{await api('/api/auth/login',{method:'POST',body:JSON.stringify(Object.fromEntries(new FormData(form)))});form.reset();msg('message','');await refresh()}catch(err){msg('message',err.message)}finally{b.disabled=false}});
 let signupMode=false;
-function setSignupMode(on){signupMode=on;$('login').classList.toggle('hidden',on);$('signup').classList.toggle('hidden',!on);msg('authEyebrow',on?'GET STARTED':'WELCOME BACK');msg('authTitle',on?'Create your cloud account.':'Sign in to your workspace.');msg('authSubtitle',on?'Create a student account to claim an available desktop.':'Everything you need, right where you left it.');$('authSwitchText').firstChild.textContent=on?'Already have an account? ':'New to Asan IB Cloud? ';msg('authSwitch',on?'Sign in':'Create an account');msg('message','')}
-$('authSwitch').onclick=()=>setSignupMode(!signupMode);
+function setSignupMode(on){
+ signupMode=on;
+ $('login').classList.toggle('hidden',on);
+ $('signup').classList.toggle('hidden',!on);
+ msg('authEyebrow',on?'GET STARTED':'WELCOME BACK');
+ msg('authTitle',on?'Create your cloud account.':'Sign in to your workspace.');
+ msg('authSubtitle',on?'Create a student account to claim an available desktop.':'Everything you need, right where you left it.');
+ msg('authSwitchLabel',on?'Already have an account?':'New to Asan IB Cloud?');
+ msg('authSwitch',on?'Sign in':'Create an account');
+ msg('message','');
+}
+$('authSwitch').addEventListener('click',()=>setSignupMode(!signupMode));
 $('signup').addEventListener('submit',async e=>{e.preventDefault();const form=e.currentTarget;const b=$('signupButton');const data=Object.fromEntries(new FormData(form));if(data.password!==data.confirmPassword){msg('message','Passwords do not match.');return}b.disabled=true;msg('message','Creating your account…');try{await api('/api/auth/signup',{method:'POST',body:JSON.stringify({email:data.email,password:data.password})});form.reset();msg('message','');await refresh()}catch(err){msg('message',err.message)}finally{b.disabled=false}});
 $('logout').onclick=async()=>{try{await api('/api/auth/logout',{method:'POST'});currentUser=null;await refresh()}catch(e){msg('dashMessage',e.message)}};refresh();
