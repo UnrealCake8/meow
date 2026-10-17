@@ -176,6 +176,23 @@ app.get('/api/admin/overview',auth,admin,run(async(_req,res)=>{
  const {rows:[row]}=await pool.query('SELECT (SELECT count(*)::int FROM users WHERE role=\'student\') students,(SELECT count(*)::int FROM vms) vms,(SELECT count(*)::int FROM claims WHERE released_at IS NULL) claimed');
  res.json(row);
 }));
+// Explicitly delegate browser features from Connect pages to the VM iframe.
+// Permission prompts still belong to the embedded vmN origin until same-origin proxying is deployed.
+app.use((req,res,next)=>{
+ const n=vmFromHost(req.get('host'));
+ if(n){
+  const origin='https://vm'+n+'.asanib.com';
+  res.set('Permissions-Policy',[
+   'camera=(self "'+origin+'")',
+   'microphone=(self "'+origin+'")',
+   'clipboard-read=(self "'+origin+'")',
+   'clipboard-write=(self "'+origin+'")',
+   'display-capture=(self "'+origin+'")',
+   'fullscreen=(self "'+origin+'")'
+  ].join(', '));
+ }
+ next();
+});
 app.get('/',(req,res)=>res.sendFile(path.join(root,'public',vmFromHost(req.get('host'))?'connect.html':'index.html')));
 app.use(express.static(path.join(root,'public'),{index:false,dotfiles:'deny'}));
 app.use((err,req,res,next)=>{console.error(err);res.status(500).json({error:'Server error'});});
