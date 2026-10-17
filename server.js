@@ -116,8 +116,62 @@ app.get('/api/connect/vm',auth,run(async(req,res)=>{
  res.set('Cache-Control','no-store').json({url:'https://vm'+number+'.asanib.com'});
 }));
 app.get('/api/admin/users',auth,admin,run(async(_req,res)=>{const {rows}=await pool.query('SELECT id,email,role FROM users ORDER BY id LIMIT 500');res.json({users:rows})}));
-app.get('/api/admin/vms',auth,admin,run(async(_req,res)=>{const {rows}=await pool.query('SELECT v.id,v.name,v.os,v.enabled,c.user_id,u.email AS assigned_to FROM vms v LEFT JOIN claims c ON c.vm_id=v.id AND c.released_at IS NULL LEFT JOIN users u ON u.id=c.user_id ORDER BY v.id');res.json({vms:rows})}));
+app.get('/api/admin/vms',auth,admin,run(async(_req,res)=>{const {rows}=await pool.query('SELECT v.id,v.name,v.os,v.notes,v.enabled,c.user_id,u.email AS assigned_to FROM vms v LEFT JOIN claims c ON c.vm_id=v.id AND c.released_at IS NULL LEFT JOIN users u ON u.id=c.user_id ORDER BY v.id');res.json({vms:rows})}));
 app.post('/api/admin/vms/:id/release',auth,admin,run(async(req,res)=>{const id=Number(req.params.id);if(!Number.isSafeInteger(id)||id<1)return res.status(400).json({error:'Invalid VM'});const {rowCount}=await pool.query('UPDATE claims SET released_at=NOW() WHERE vm_id=$1 AND released_at IS NULL',[id]);res.json({ok:true,released:rowCount})}));
+// VM administration manages portal inventory only; it does not create or destroy Docker containers.
+const vmId=value=>{const id=Number(value);return Number.isSafeInteger(id)&&id>=1&&id<=21?id:null};
+const vmInput=body=>{
+ const name=typeof body?.name==='string'?body.name.trim():'';
+ const os=typeof body?.os==='string'?body.os.trim():'';
+ const notes=typeof body?.notes==='string'?body.notes.trim():'';
+ if(!name||name.length>100||!os||os.length>80||notes.length>1000||typeof body?.enabled!=='boolean')return null;
+ return {name,os,notes,enabled:body.enabled?1:0};
+};
+function encodeVmUrl(id){
+ if(!/^[a-f0-9]{64}$/i.test(key||''))throw Error('CREDENTIAL_KEY must be 64 hexadecimal characters');
+ const iv=crypto.randomBytes(12),cipher=crypto.createCipheriv('aes-256-gcm',Buffer.from(key,'hex'),iv);
+ const encrypted=Buffer.concat([cipher.update('https://vm'+id+'.asanib.com','utf8'),cipher.final()]);
+ return Buffer.concat([iv,cipher.getAuthTag(),encrypted]).toString('base64');
+}
+app.post('/api/admin/vms',auth,admin,run(async(req,res)=>{
+ const id=vmId(req.body?.id),data=vmInput(req.body);
+ if(!id||!data)return res.status(400).json({error:'VM number (1–21), name, OS, notes and enabled status are required'});
+ try{
+  const {rows:[vm]}=await pool.query('INSERT INTO vms(id,name,os,notes,enabled,url_enc) VALUES($1,$2,$3,$4,$5,$6) RETURNING id,name,os,notes,enabled',[id,data.name,data.os,data.notes,data.enabled,encodeVmUrl(id)]);
+  res.status(201).json({vm});
+ }catch(e){if(e.code==='23505')return res.status(409).json({error:'That VM number already exists. Edit or restore it instead.'});throw e}
+}));
+app.patch('/api/admin/vms/:id',auth,admin,run(async(req,res)=>{
+ const id=vmId(req.params.id),data=vmInput(req.body);
+ if(!id||!data)return res.status(400).json({error:'Invalid VM details'});
+ const client=await pool.connect();
+ try{
+  await client.query('BEGIN');
+  const {rows:[vm]}=await client.query('SELECT id FROM vms WHERE id=$1 FOR UPDATE',[id]);
+  if(!vm){await client.query('ROLLBACK');return res.status(404).json({error:'VM not found'})}
+  if(!data.enabled){
+   const {rows:[claimed]}=await client.query('SELECT 1 FROM claims WHERE vm_id=$1 AND released_at IS NULL LIMIT 1',[id]);
+   if(claimed){await client.query('ROLLBACK');return res.status(409).json({error:'Release the active assignment before disabling this VM'})}
+  }
+  const {rows:[updated]}=await client.query('UPDATE vms SET name=$2,os=$3,notes=$4,enabled=$5 WHERE id=$1 RETURNING id,name,os,notes,enabled',[id,data.name,data.os,data.notes,data.enabled]);
+  await client.query('COMMIT');res.json({vm:updated});
+ }catch(e){await client.query('ROLLBACK').catch(()=>{});throw e}finally{client.release()}
+}));
+app.delete('/api/admin/vms/:id',auth,admin,run(async(req,res)=>{
+ const id=vmId(req.params.id);
+ if(!id)return res.status(400).json({error:'Invalid VM number'});
+ const client=await pool.connect();
+ try{
+  await client.query('BEGIN');
+  const {rows:[vm]}=await client.query('SELECT id FROM vms WHERE id=$1 FOR UPDATE',[id]);
+  if(!vm){await client.query('ROLLBACK');return res.status(404).json({error:'VM not found'})}
+  const {rows:[claimed]}=await client.query('SELECT 1 FROM claims WHERE vm_id=$1 AND released_at IS NULL LIMIT 1',[id]);
+  if(claimed){await client.query('ROLLBACK');return res.status(409).json({error:'Release the assignment before removing this VM'})}
+  // Soft-delete preserves claim history and allows an administrator to restore the VM.
+  await client.query('UPDATE vms SET enabled=0 WHERE id=$1',[id]);
+  await client.query('COMMIT');res.json({ok:true,removedFromDirectory:true});
+ }catch(e){await client.query('ROLLBACK').catch(()=>{});throw e}finally{client.release()}
+}));
 app.get('/api/admin/overview',auth,admin,run(async(_req,res)=>{
  const {rows:[row]}=await pool.query('SELECT (SELECT count(*)::int FROM users WHERE role=\'student\') students,(SELECT count(*)::int FROM vms) vms,(SELECT count(*)::int FROM claims WHERE released_at IS NULL) claimed');
  res.json(row);
