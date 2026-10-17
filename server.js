@@ -36,6 +36,26 @@ const loginLimiter=rateLimit({windowMs:15*60*1000,limit:15,standardHeaders:'draf
 app.get('/api/health',(_req,res)=>res.json({ok:true}));
 app.get('/api/ready',run(async(_req,res)=>{await pool.query('SELECT 1');res.json({ok:true})}));
 app.get('/api/me',(req,res)=>res.json({user:req.session.userId?{email:req.session.email,role:req.session.role}:null}));
+const signupLimiter=rateLimit({windowMs:60*60*1000,limit:5,standardHeaders:'draft-7',legacyHeaders:false,message:{error:'Too many sign-up attempts. Please try again later.'}});
+app.post('/api/auth/signup',signupLimiter,run(async(req,res)=>{
+ const email=typeof req.body?.email==='string'?req.body.email.trim().toLowerCase():'';
+ const password=typeof req.body?.password==='string'?req.body.password:'';
+ if(email.length>254||!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))return res.status(400).json({error:'Enter a valid email address'});
+ if(password.length<12||Buffer.byteLength(password,'utf8')>72)return res.status(400).json({error:'Use a password of 12–72 bytes'});
+ const passwordHash=await bcrypt.hash(password,12);
+ let user;
+ try{
+  const result=await pool.query("INSERT INTO users (email,password_hash,role) VALUES ($1,$2,'student') RETURNING id,email,role",[email,passwordHash]);
+  user=result.rows[0];
+ }catch(err){
+  if(err.code==='23505')return res.status(409).json({error:'An account with this email already exists. Sign in instead.'});
+  throw err;
+ }
+ await new Promise((resolve,reject)=>req.session.regenerate(e=>e?reject(e):resolve()));
+ req.session.userId=user.id;req.session.email=user.email;req.session.role=user.role;
+ await new Promise((resolve,reject)=>req.session.save(e=>e?reject(e):resolve()));
+ res.status(201).json({ok:true});
+}));
 app.post('/api/auth/login',loginLimiter,run(async(req,res)=>{
  const email=typeof req.body?.email==='string'?req.body.email.trim().toLowerCase():'';
  const password=typeof req.body?.password==='string'?req.body.password:'';
